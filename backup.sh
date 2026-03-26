@@ -10,6 +10,7 @@ C_BOLD_YELLOW="\033[1;33m"
 C_BOLD_RED="\033[1;31m"
 C_BOLD_CYAN="\033[1;36m"
 C_BOLD_MAGENTA="\033[1;35m"
+C_BOLD_GRAY="\033[1;30m"
 C_RESET="\033[0m"
 
 INFO="${C_BOLD_BLUE}[INFO]${C_RESET}"
@@ -17,15 +18,10 @@ ERROR="${C_BOLD_RED}[ERROR]${C_RESET}"
 SUCCESS="${C_BOLD_GREEN}[OK]${C_RESET}"
 WARN="${C_BOLD_YELLOW}[WARN]${C_RESET}"
 
-# ========== 环境加载 ==========
-if [ -f "$HOME/.env" ]; then
-    source "$HOME/.env"
-fi
-
 # ========== 备份 OpenList ==========
 backup_openlist() {
     echo -e "${C_BOLD_BLUE}┌──────────────────────────┐${C_RESET}"
-    echo -e "${C_BOLD_BLUE}│    备份 OpenList 配��    │${C_RESET}"
+    echo -e "${C_BOLD_BLUE}│    备份 OpenList 配置    │${C_RESET}"
     echo -e "${C_BOLD_BLUE}└──────────────────────────┘${C_RESET}"
     echo ""
     
@@ -72,7 +68,8 @@ restore_openlist() {
     echo -e "${C_BOLD_BLUE}└──────────────────────────┘${C_RESET}"
     echo ""
     
-    local backups=($(ls -1t "$BACKUP_DIR"/backup_*.tar.gz 2>/dev/null))
+    local backups=()
+    mapfile -t backups < <(ls -1t "$BACKUP_DIR"/backup_*.tar.gz 2>/dev/null)
     
     if [ ${#backups[@]} -eq 0 ]; then
         echo -e "${WARN} 本地没有可用备份。"
@@ -99,8 +96,16 @@ restore_openlist() {
     echo -ne "${C_BOLD_CYAN}输入要还原的备份编号 (1-${#backups[@]})，或按 0 返回:${C_RESET} "
     read sel
     
-    if [[ ! "$sel" =~ ^[0-9]+$ ]] || [ "$sel" -lt 1 ] || [ "$sel" -gt "${#backups[@]}" ]; then
+    if [ "$sel" = "0" ]; then
         echo -e "${INFO} 已取消还原。"
+        echo ""
+        echo -e "${C_BOLD_MAGENTA}按回车键返回菜单...${C_RESET}"
+        read
+        return 0
+    fi
+
+    if [[ ! "$sel" =~ ^[0-9]+$ ]] || [ "$sel" -lt 1 ] || [ "$sel" -gt "${#backups[@]}" ]; then
+        echo -e "${ERROR} 输入无效，请输入 0-${#backups[@]} 之间的编号。"
         echo ""
         echo -e "${C_BOLD_MAGENTA}按回车键返回菜单...${C_RESET}"
         read
@@ -127,14 +132,51 @@ restore_openlist() {
     
     echo ""
     echo -e "${INFO} 正在还原备份..."
-    
-    rm -rf "$DATA_DIR"
-    if tar -xzf "$restore_file" -C "$DEST_DIR" 2>/dev/null; then
-        echo -e "${SUCCESS} ✓ 还原成功！"
-        echo -e "${INFO} OpenList 配置已还原完成。"
-    else
+
+    local tmp_dir current_backup
+    tmp_dir=$(mktemp -d) || {
+        echo -e "${ERROR} 无法创建临时目录，终止还原。"
+        echo -e "${C_BOLD_MAGENTA}按回车键返回菜单...${C_RESET}"
+        read
+        return 1
+    }
+
+    if ! tar -xzf "$restore_file" -C "$tmp_dir" 2>/dev/null || [ ! -d "$tmp_dir/data" ]; then
+        rm -rf "$tmp_dir"
         echo -e "${ERROR} ✗ 还原失败！"
         echo -e "${ERROR} 请检查备份文件是否损坏。"
+        echo ""
+        echo -e "${C_BOLD_MAGENTA}按回车键返回菜单...${C_RESET}"
+        read
+        return 1
+    fi
+
+    current_backup=""
+    if [ -d "$DATA_DIR" ]; then
+        current_backup="$DEST_DIR/data.pre-restore.$(date +%Y%m%d_%H%M%S)"
+        mv "$DATA_DIR" "$current_backup" || {
+            rm -rf "$tmp_dir"
+            echo -e "${ERROR} 无法备份当前 data 目录，终止还原。"
+            echo -e "${C_BOLD_MAGENTA}按回车键返回菜单...${C_RESET}"
+            read
+            return 1
+        }
+    fi
+
+    if mv "$tmp_dir/data" "$DATA_DIR"; then
+        rm -rf "$tmp_dir"
+        echo -e "${SUCCESS} ✓ 还原成功！"
+        echo -e "${INFO} OpenList 配置已还原完成。"
+        if [ -n "$current_backup" ]; then
+            echo -e "${INFO} 旧数据已备份到：${C_BOLD_YELLOW}$current_backup${C_RESET}"
+        fi
+    else
+        rm -rf "$DATA_DIR"
+        if [ -n "$current_backup" ] && [ -d "$current_backup" ]; then
+            mv "$current_backup" "$DATA_DIR"
+        fi
+        rm -rf "$tmp_dir"
+        echo -e "${ERROR} ✗ 还原失败，已尽量恢复原数据。"
         echo ""
         echo -e "${C_BOLD_MAGENTA}按回车键返回菜单...${C_RESET}"
         read

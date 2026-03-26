@@ -18,14 +18,6 @@ ERROR="${C_BOLD_RED}[ERROR]${C_RESET}"
 SUCCESS="${C_BOLD_GREEN}[OK]${C_RESET}"
 WARN="${C_BOLD_YELLOW}[WARN]${C_RESET}"
 
-# ========== 环境初始化 ==========
-if [ -f "$HOME/.env" ]; then
-    source "$HOME/.env"
-else
-    echo -e "${ERROR} 未找到 $HOME/.env 文件，请按仓库内模板配置env。"
-    exit 1
-fi
-
 # ========== 路径初始化 ==========
 init_paths() {
     REAL_PATH=$(readlink -f "$0")
@@ -40,6 +32,8 @@ init_paths() {
             SCRIPT_DIR="$HOME/openlist_termux"
         elif [ -f "$HOME/.openlist_termux/main.sh" ]; then
             SCRIPT_DIR="$HOME/.openlist_termux"
+        elif [ -f "$HOME/project/openlist_termux/main.sh" ]; then
+            SCRIPT_DIR="$HOME/project/openlist_termux"
         else
             # 尝试从 PREFIX 目录找
             if [ -f "$PREFIX/etc/openlist_termux/main.sh" ]; then
@@ -85,6 +79,28 @@ init_paths() {
     ARIA2_MODULE="$SCRIPT_DIR/aria2.sh"
     BACKUP_MODULE="$SCRIPT_DIR/backup.sh"
     TUNNEL_MODULE="$SCRIPT_DIR/tunnel.sh"
+}
+
+# ========== 环境初始化 ==========
+load_env() {
+    local env_candidates=(
+        "$SCRIPT_DIR/.env"
+        "$HOME/.env"
+    )
+
+    for env_file in "${env_candidates[@]}"; do
+        if [ -f "$env_file" ]; then
+            # shellcheck disable=SC1090
+            source "$env_file"
+            ENV_FILE="$env_file"
+            return 0
+        fi
+    done
+
+    echo -e "${ERROR} 未找到配置文件 .env"
+    echo -e "${INFO} 请优先在脚本目录放置 .env：${C_BOLD_YELLOW}$SCRIPT_DIR/.env${C_RESET}"
+    echo -e "${INFO} 也兼容读取：${C_BOLD_YELLOW}$HOME/.env${C_RESET}"
+    exit 1
 }
 
 # ========== 模块检查 ==========
@@ -134,15 +150,19 @@ ensure_oplist_shortcut() {
         fi
         echo -e "${INFO} 已将 ${C_BOLD_YELLOW}$PREFIX/bin${C_RESET} 添加到 PATH。请重启终端确保永久生效。"
     fi
-    if [ ! -f "$OPLIST_PATH" ] || [ "$REAL_PATH" != "$(readlink -f "$OPLIST_PATH")" ]; then
-        if [ "$REAL_PATH" != "$OPLIST_PATH" ]; then
-            cp "$REAL_PATH" "$OPLIST_PATH"
-            chmod +x "$OPLIST_PATH"
-            echo -e "${SUCCESS} 已将脚本安装为全局命令：${C_BOLD_YELLOW}oplist${C_RESET}"
-            echo -e "${INFO} 你现在可以随时输入 ${C_BOLD_YELLOW}oplist${C_RESET} 启动管理菜单！"
-            sleep 3
-        fi
+
+    if [ "$REAL_PATH" = "$OPLIST_PATH" ]; then
+        return 0
     fi
+
+    cat > "$OPLIST_PATH" <<EOF
+#!/data/data/com.termux/files/usr/bin/bash
+exec "$REAL_PATH" "\$@"
+EOF
+    chmod +x "$OPLIST_PATH"
+
+    echo -e "${SUCCESS} 已将脚本安装为全局命令：${C_BOLD_YELLOW}oplist${C_RESET}"
+    echo -e "${INFO} 你现在可以随时输入 ${C_BOLD_YELLOW}oplist${C_RESET} 启动管理菜单！"
 }
 
 init_cache_dir() {
@@ -338,6 +358,7 @@ show_menu() {
 
 # ========== 主程序流程 ==========
 init_paths
+load_env
 check_modules
 ensure_oplist_shortcut
 
