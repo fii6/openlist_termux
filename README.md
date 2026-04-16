@@ -1,97 +1,112 @@
+# OpenList Termux
 
-# Termux 下的 OpenList 管理脚本
+Termux 环境下的 [OpenList](https://github.com/OpenListTeam/OpenList) 一站式管理工具，集成 aria2 高速下载与 Cloudflare Tunnel 外网访问。
 
-这是一个用于在 Android Termux 环境中便捷安装、更新和管理 [OpenList](https://github.com/OpenListTeam/OpenList) 的脚本，简化操作流程并提供丰富功能。
+## 功能一览
 
-## 功能
-- **一键安装与更新**：在 Termux 中快速安装或更新 OpenList。
-- **高效下载**：集成 aria2，支持高速下载。
-- **快捷命令**：通过 `oplist` 命令快速打开管理菜单。
-- **版本检测**：支持非实时检测 OpenList 新版本。
-- **开机自启**：支持 OpenList 和 aria2 开机自动启动。
-- **数据备份与恢复**：支持本地备份与本地还原。
-- **外网访问**：通过 Cloudflare Tunnel 实现外网访问。
+| 类别 | 功能 |
+|------|------|
+| OpenList | 一键安装/更新、启动/停止、密码重置、配置编辑、日志查看、卸载 |
+| aria2 | 自动配置、启动/停止、BT Tracker 更新、配置编辑、日志查看、卸载 |
+| Cloudflare Tunnel | 一键配置隧道、启动/停止外网访问、日志查看、卸载 |
+| 运维 | 开机自启、版本检测、数据备份/还原/残留清理、全局快捷命令 `oplist` |
 
 ## 前置要求
-1. **安装必要工具**：
-   在 Termux 中运行以下命令安装 `curl` 和 `wget`：
-   ```bash
-   pkg install -y wget curl
-   ```
 
-2. **GitHub 个人访问令牌（Token，可选）**：
-   - 用途：用于提升 GitHub API 访问稳定性，避免速率限制。
-   - 当前脚本部分功能依赖该字段；如果留空，版本检查和 OpenList 下载可能受限。
-   - 获取方法：
-     1. 访问 [GitHub 设置 > 开发者设置 > 个人访问令牌 > 经典令牌](https://github.com/settings/tokens)。
-     2. 点击 **生成新令牌（经典）**。
-     3. 权限选择：公开仓库场景通常无需额外权限；如需访问私有仓库，再按需勾选权限。
-     4. 生成后复制令牌，并保存至 `.env` 文件的 `GITHUB_TOKEN` 字段。
-     - **注意**：令牌仅显示一次，务必妥善保存。
+- **Termux** (Android)
+- **curl**：`pkg install -y curl`（脚本会自动检测并尝试安装）
+- **Termux Boot** (可选，开机自启)：[下载 v0.8.1](https://github.com/termux/termux-boot/releases/download/v0.8.1/termux-boot-app_v0.8.1+github.debug.apk)
+- **Cloudflare 账号及域名** (可选，外网访问)
 
-3. **aria2 RPC 密钥**：
-   - 设置一个由字母、数字和符号组成的密钥，用于 aria2 RPC 认证。
-   - 保存至 `.env` 文件的 `ARIA2_SECRET` 字段。
+## 快速开始
 
-4. **Termux Boot 插件**：
-   - 下载地址：[Termux Boot v0.8.1](https://github.com/termux/termux-boot/releases/download/v0.8.1/termux-boot-app_v0.8.1+github.debug.apk)
-   - 用途：实现 OpenList 和 aria2 的开机自启。
-
-5. **Cloudflare 账号及托管于其上的域名**：
-   - 用于通过 Cloudflare Tunnel 实现 OpenList 的外网访问。
-   - 建议提前登录 Cloudflare 账号。
-
-## 安装与使用
-1. **配置 `.env` 文件**：
-   - 先复制模板：`cp .env.example .env`
-   - 推荐将 `.env` 放在**脚本同目录**；当前脚本也兼容读取 `~/.env`。
-   - 至少建议填写：`ARIA2_SECRET`；如需稳定下载与版本检测，再填写 `GITHUB_TOKEN`。
-
-2. **运行脚本**：
-   在 Termux 中执行以下命令：
-   ```bash
-   git clone https://github.com/fii6/openlist_termux.git
-   cd openlist_termux
-   chmod +x main.sh *.sh
-   ./main.sh
-   ```
-
-   首次运行后，脚本会自动安装全局命令 `oplist`，之后可直接输入：
-   ```bash
-   oplist
-   ```
-
-3. **执行流程**：
-   - 输入标号 1 安装OpenList。
-   - 输入标号 3 启动 openlist 和 aria2。
-   - 更多功能 打开 二级菜单功能。
-
-4. **开机自启设置**：
-   - 安装 Termux Boot 插件后，脚本会在 OpenList 和 aria2 启动成功后询问是否启用开机自启：
-     - 输入 `y` 启用。
-     - 输入 `n` 取消。
-
-6. **数据备份与恢复**：
-   - 当前版本已支持**本地备份**与**本地还原**。
-   - 默认备份目录：`/sdcard/Download`
-   - 备份内容：`$HOME/Openlist/data`
-
-## 快捷使用
-安装完成后，可通过以下命令快速打开管理菜单：
 ```bash
-oplist
+# 克隆仓库
+git clone https://github.com/fii6/openlist_termux.git
+cd openlist_termux
+
+# 创建配置文件并填写
+cp .env.example .env
+vi .env    # 至少填写 ARIA2_SECRET
+
+# 运行
+chmod +x *.sh
+./main.sh
 ```
-无需记忆复杂路径或参数，即可管理所有功能。
+
+首次运行自动安装全局命令，之后直接输入 `oplist` 即可打开管理菜单。
+
+## 配置说明
+
+复制 `.env.example` 为 `.env`，按需填写：
+
+| 变量 | 必填 | 说明 |
+|------|:----:|------|
+| `ARIA2_SECRET` | 是 | aria2 RPC 认证密钥 |
+| `GITHUB_TOKEN` | 否 | GitHub Token，提升版本检测与下载稳定性（[获取方法](https://github.com/settings/tokens)） |
+| `TUNNEL_NAME` | 否 | Cloudflare Tunnel 名称 |
+| `DOMAIN` | 否 | 外网访问域名 |
+| `LOCAL_PORT` | 否 | OpenList 本地端口，默认 `5244` |
+
+> `.env` 优先从脚本同目录读取，也兼容 `~/.env`。
+
+## 菜单结构
+
+```
+主菜单
+ 1. 安装 OpenList
+ 2. 更新 OpenList
+ 3. 启动 OpenList 和 aria2
+ 4. 停止 OpenList 和 aria2
+ 5. 查看 OpenList 启动日志
+ 6. 查看 aria2 启动日志
+ 7. 更多功能
+     1. 修改 OpenList 密码
+     2. 编辑 OpenList 配置文件
+     3. 编辑 aria2 配置文件
+     4. 更新 aria2 BT Tracker
+     5. 备份/还原 OpenList 配置
+         1. 备份
+         2. 还原
+         3. 清理还原残留目录
+     6. 开启 OpenList 外网访问
+     7. 停止 OpenList 外网访问
+     8. 查看 Cloudflare Tunnel 日志
+     9. 一键卸载（OpenList + aria2 + Tunnel）
+ 0. 退出
+```
+
+## 项目结构
+
+```
+openlist_termux/
+├── main.sh          # 入口脚本，主菜单与流程控制
+├── common.sh        # 公共定义（颜色、日志轮转、进程管理等）
+├── openlist.sh      # OpenList 安装/启动/更新/停止/卸载
+├── aria2.sh         # aria2 配置/启动/停止/Tracker 更新/卸载
+├── backup.sh        # 数据备份/还原/残留清理
+├── tunnel.sh        # Cloudflare Tunnel 配置/启动/停止/卸载
+├── .env.example     # 配置模板
+└── .gitignore
+```
+
+## 数据目录
+
+| 路径 | 用途 |
+|------|------|
+| `~/Openlist/` | OpenList 工作目录 |
+| `~/Openlist/data/` | OpenList 数据与配置 |
+| `~/aria2/` | aria2 配置、会话、DHT |
+| `~/.cloudflared/` | Cloudflare Tunnel 凭证与配置 |
+| `/sdcard/Download/` | 默认备份与下载目录 |
 
 ## 注意事项
-- **网络稳定性**：安装或更新时请确保网络连接稳定。
-- **敏感信息**：请勿将填写好的 `.env` 提交到仓库；仓库只保留 `.env.example` 模板。
-- **Cloudflare Tunnel**：确保正确配置 Cloudflare 账号和域名以实现外网访问。
 
-## 常见问题
-- **无法下载文件**：
-  - 可能原因：网络问题，或未正确配置 `.env` 中的必要字段。
-  - 解决方案：检查网络、确认 `ARIA2_SECRET` 已填写；如需要更稳定的 GitHub 访问，再补 `GITHUB_TOKEN`。
+- 安装/更新时请确保网络连接稳定
+- `.env` 包含敏感信息，切勿提交到仓库
+- 开机自启依赖 [Termux Boot](https://github.com/termux/termux-boot) 插件
+- Cloudflare Tunnel 需提前将域名托管到 Cloudflare
 
-## 支持与反馈
-如有问题或建议，请在当前 GitHub 仓库提交 issue。
+## 问题反馈
+
+请在 GitHub 仓库提交 [issue](https://github.com/fii6/openlist_termux/issues)。

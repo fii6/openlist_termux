@@ -1,28 +1,11 @@
 #!/data/data/com.termux/files/usr/bin/bash
-
-# ========== 颜色定义 ==========
-C_BOLD_BLUE="\033[1;34m"
-C_BOLD_GREEN="\033[1;32m"
-C_BOLD_YELLOW="\033[1;33m"
-C_BOLD_RED="\033[1;31m"
-C_BOLD_CYAN="\033[1;36m"
-C_BOLD_MAGENTA="\033[1;35m"
-C_BOLD_GRAY="\033[1;30m"
-C_BOLD_ORANGE="\033[38;5;208m"
-C_BOLD_PINK="\033[38;5;213m"
-C_BOLD_LIME="\033[38;5;118m"
-C_RESET="\033[0m"
-
-INFO="${C_BOLD_BLUE}[INFO]${C_RESET}"
-ERROR="${C_BOLD_RED}[ERROR]${C_RESET}"
-SUCCESS="${C_BOLD_GREEN}[OK]${C_RESET}"
-WARN="${C_BOLD_YELLOW}[WARN]${C_RESET}"
+set -uo pipefail
 
 # ========== 路径初始化 ==========
 init_paths() {
     REAL_PATH=$(readlink -f "$0")
     SCRIPT_NAME=$(basename "$REAL_PATH")
-    
+
     # 如果是通过 oplist 快捷方式启动，需要查找原始脚本目录
     if [ "$SCRIPT_NAME" = "oplist" ] || [ "$REAL_PATH" = "/data/data/com.termux/files/usr/bin/oplist" ]; then
         # 尝试从 HOME 目录找到原始脚本
@@ -51,29 +34,29 @@ init_paths() {
     else
         SCRIPT_DIR=$(dirname "$REAL_PATH")
     fi
-    
+
     DEST_DIR="$HOME/Openlist"
     DATA_DIR="$DEST_DIR/data"
     OPENLIST_BIN="$PREFIX/bin/openlist"
     OPENLIST_LOGDIR="$DATA_DIR/log"
     OPENLIST_LOG="$OPENLIST_LOGDIR/openlist.log"
     OPENLIST_CONF="$DATA_DIR/config.json"
-    
+
     ARIA2_DIR="$HOME/aria2"
     ARIA2_LOG="$ARIA2_DIR/aria2.log"
     ARIA2_CONF="$ARIA2_DIR/aria2.conf"
     ARIA2_CMD="aria2c"
-    
+
     OPLIST_PATH="$PREFIX/bin/oplist"
     CACHE_DIR="$DATA_DIR/.cache"
     VERSION_CACHE="$CACHE_DIR/version.cache"
     VERSION_CHECKING="$CACHE_DIR/version.checking"
-    
+
     BACKUP_DIR="/sdcard/Download"
     CONFIG_DIR="$HOME/.cloudflared"
     CF_CONFIG="$CONFIG_DIR/config.yml"
     CF_LOG="$CONFIG_DIR/tunnel.log"
-    
+
     # 模块脚本路径
     OPENLIST_MODULE="$SCRIPT_DIR/openlist.sh"
     ARIA2_MODULE="$SCRIPT_DIR/aria2.sh"
@@ -93,6 +76,12 @@ load_env() {
             # shellcheck disable=SC1090
             source "$env_file"
             ENV_FILE="$env_file"
+            # 为可选变量设置默认值（兼容 set -u）
+            GITHUB_TOKEN="${GITHUB_TOKEN:-}"
+            TUNNEL_NAME="${TUNNEL_NAME:-}"
+            DOMAIN="${DOMAIN:-}"
+            LOCAL_PORT="${LOCAL_PORT:-5244}"
+            ARIA2_SECRET="${ARIA2_SECRET:-}"
             return 0
         fi
     done
@@ -106,37 +95,19 @@ load_env() {
 # ========== 模块检查 ==========
 check_modules() {
     local missing=0
-    
-    if [ ! -f "$OPENLIST_MODULE" ]; then
-        echo -e "${ERROR} 找不到模块文件：${C_BOLD_YELLOW}openlist.sh${C_RESET}"
-        missing=1
-    fi
-    
-    if [ ! -f "$ARIA2_MODULE" ]; then
-        echo -e "${ERROR} 找不到模块文件：${C_BOLD_YELLOW}aria2.sh${C_RESET}"
-        missing=1
-    fi
-    
-    if [ ! -f "$BACKUP_MODULE" ]; then
-        echo -e "${ERROR} 找不到模块文件：${C_BOLD_YELLOW}backup.sh${C_RESET}"
-        missing=1
-    fi
-    
-    if [ ! -f "$TUNNEL_MODULE" ]; then
-        echo -e "${ERROR} 找不到模块文件：${C_BOLD_YELLOW}tunnel.sh${C_RESET}"
-        missing=1
-    fi
-    
+
+    for mod in "$OPENLIST_MODULE" "$ARIA2_MODULE" "$BACKUP_MODULE" "$TUNNEL_MODULE"; do
+        if [ ! -f "$mod" ]; then
+            echo -e "${ERROR} 找不到模块文件：${C_BOLD_YELLOW}$(basename "$mod")${C_RESET}"
+            missing=1
+        fi
+    done
+
     if [ $missing -eq 1 ]; then
         echo ""
         echo -e "${ERROR} 缺少必要的模块文件！"
         echo -e "${INFO} 所有脚本文件应该在同一目录：${C_BOLD_YELLOW}$SCRIPT_DIR${C_RESET}"
-        echo -e "${INFO} 需要的文件："
-        echo -e "    - main.sh"
-        echo -e "    - openlist.sh"
-        echo -e "    - aria2.sh"
-        echo -e "    - backup.sh"
-        echo -e "    - tunnel.sh"
+        echo -e "${INFO} 需要的文件：main.sh, openlist.sh, aria2.sh, backup.sh, tunnel.sh"
         exit 1
     fi
 }
@@ -179,7 +150,7 @@ get_local_version() {
 }
 
 get_latest_version() {
-    if [ -f "$VERSION_CACHE" ] && [ "$(find "$VERSION_CACHE" -mmin -20)" ]; then
+    if [ -f "$VERSION_CACHE" ] && [ -s "$VERSION_CACHE" ] && [ "$(find "$VERSION_CACHE" -mmin -20)" ]; then
         head -n1 "$VERSION_CACHE"
     else
         echo "检测更新中..."
@@ -187,15 +158,27 @@ get_latest_version() {
 }
 
 check_version_bg() {
-    if { [ ! -f "$VERSION_CACHE" ] || [ ! "$(find "$VERSION_CACHE" -mmin -20)" ]; } && [ ! -f "$VERSION_CHECKING" ]; then
+    # 清理超过 60 秒的过期锁文件
+    if [ -f "$VERSION_CHECKING" ]; then
+        local lock_age
+        lock_age=$(( $(date +%s) - $(stat -c %Y "$VERSION_CHECKING" 2>/dev/null || echo 0) ))
+        if [ "$lock_age" -gt 60 ]; then
+            rm -f "$VERSION_CHECKING"
+        fi
+    fi
+
+    if { [ ! -f "$VERSION_CACHE" ] || [ ! -s "$VERSION_CACHE" ] || [ ! "$(find "$VERSION_CACHE" -mmin -20)" ]; } && [ ! -f "$VERSION_CHECKING" ]; then
         if [ -z "$GITHUB_TOKEN" ]; then
             return
         fi
         touch "$VERSION_CHECKING"
         (
-            curl -s -m 10 -H "Authorization: token $GITHUB_TOKEN" \
-            "https://api.github.com/repos/OpenListTeam/OpenList/releases/latest" | \
-            sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p' | head -n1 > "$VERSION_CACHE"
+            result=$(curl -s -m 10 -H "Authorization: token $GITHUB_TOKEN" \
+                "https://api.github.com/repos/OpenListTeam/OpenList/releases/latest" | \
+                sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p' | head -n1)
+            if [ -n "$result" ]; then
+                printf '%s\n' "$result" > "$VERSION_CACHE"
+            fi
             rm -f "$VERSION_CHECKING"
         ) &
     fi
@@ -204,14 +187,6 @@ check_version_bg() {
 # ========== 辅助函数 ==========
 divider() {
     echo -e "${C_BOLD_BLUE}======================================${C_RESET}"
-}
-
-check_openlist_process() {
-    pgrep -f "$OPENLIST_BIN server" >/dev/null 2>&1
-}
-
-check_aria2_process() {
-    pgrep -f "$ARIA2_CMD --conf-path=$ARIA2_CONF" >/dev/null 2>&1
 }
 
 openlist_status_line() {
@@ -247,18 +222,15 @@ tunnel_status_line() {
 
 # ========== 启动和停止组合函数 ==========
 start_all() {
-    source "$OPENLIST_MODULE"
-    source "$ARIA2_MODULE"
-    
     # 启动 aria2
     start_aria2
-    
+
     # 启动 OpenList
     start_openlist
-    
+
     divider
     echo -e "${C_BOLD_CYAN}是否开启 OpenList 和 aria2 开机自启？(y/n):${C_RESET}"
-    read enable_boot
+    read -r enable_boot
     if [ "$enable_boot" = "y" ] || [ "$enable_boot" = "Y" ]; then
         enable_autostart_openlist
         enable_autostart_aria2
@@ -268,7 +240,7 @@ start_all() {
         echo -e "${INFO} 未开启开机自启。"
     fi
     divider
-    
+
     if command -v termux-wake-lock >/dev/null 2>&1; then
         termux-wake-lock
     fi
@@ -276,16 +248,79 @@ start_all() {
 }
 
 stop_all() {
-    source "$OPENLIST_MODULE"
-    source "$ARIA2_MODULE"
-    
     # 停止 OpenList
     stop_openlist
-    
+
     # 停止 aria2
     stop_aria2
-    
+
     return 0
+}
+
+# ========== 一键卸载 ==========
+uninstall_all() {
+    echo -e "${C_BOLD_BLUE}┌──────────────────────────┐${C_RESET}"
+    echo -e "${C_BOLD_BLUE}│       一键卸载           │${C_RESET}"
+    echo -e "${C_BOLD_BLUE}└──────────────────────────┘${C_RESET}"
+    echo ""
+    echo -e "${WARN} 此操作将卸载以下所有组件："
+    echo -e "  - OpenList（进程、数据、可执行文件、开机自启）"
+    echo -e "  - aria2（进程、配置、数据、开机自启）"
+    echo -e "  - Cloudflare Tunnel（进程、凭证、配置、开机自启）"
+    echo -e "  - 全局快捷命令 ${C_BOLD_YELLOW}oplist${C_RESET}"
+    echo ""
+    echo -ne "${C_BOLD_RED}确定全部卸载？此操作不可恢复！(y/n):${C_RESET} "
+    read -r confirm
+
+    if [ "$confirm" != "y" ] && [ "$confirm" != "Y" ]; then
+        echo -e "${INFO} 已取消卸载。"
+        wait_enter
+        return 0
+    fi
+
+    echo ""
+
+    # 停止所有进程
+    echo -e "${INFO} 正在停止所有进程..."
+    pkill -f "$OPENLIST_BIN" 2>/dev/null || true
+    pkill -f "$ARIA2_CMD" 2>/dev/null || true
+    pkill -f "cloudflared" 2>/dev/null || true
+    sleep 1
+
+    # 禁用开机自启
+    disable_autostart_openlist >/dev/null 2>&1 || true
+    disable_autostart_aria2 >/dev/null 2>&1 || true
+    disable_autostart_tunnel >/dev/null 2>&1 || true
+
+    # 删除数据和配置
+    echo -e "${INFO} 正在删除 OpenList..."
+    rm -rf "$DEST_DIR"
+    rm -f "$OPENLIST_BIN"
+    echo -e "${SUCCESS} OpenList 已卸载。"
+
+    echo -e "${INFO} 正在删除 aria2..."
+    if command -v pkg >/dev/null 2>&1; then
+        pkg uninstall -y aria2 2>/dev/null || true
+        apt autoremove -y 2>/dev/null || true
+    fi
+    rm -rf "$ARIA2_DIR"
+    echo -e "${SUCCESS} aria2 已卸载。"
+
+    echo -e "${INFO} 正在删除 Cloudflare Tunnel..."
+    if command -v pkg >/dev/null 2>&1; then
+        pkg uninstall -y cloudflared 2>/dev/null || true
+        apt autoremove -y 2>/dev/null || true
+    fi
+    rm -rf "$CONFIG_DIR"
+    echo -e "${SUCCESS} Cloudflare Tunnel 已卸载。"
+
+    # 删除快捷命令
+    rm -f "$OPLIST_PATH"
+    echo -e "${SUCCESS} 快捷命令 oplist 已移除。"
+
+    echo ""
+    echo -e "${SUCCESS} 全部卸载完成。"
+    wait_enter
 }
 
 # ========== 更多功能菜单 ==========
@@ -301,20 +336,22 @@ show_more_menu() {
         echo -e "${C_BOLD_ORANGE}6. 开启 OpenList 外网访问${C_RESET}"
         echo -e "${C_BOLD_PINK}7. 停止 OpenList 外网访问${C_RESET}"
         echo -e "${C_BOLD_LIME}8. 查看 Cloudflare Tunnel 日志${C_RESET}"
+        echo -e "${C_BOLD_RED}9. 一键卸载${C_RESET}"
         echo -e "${C_BOLD_GRAY}0. 返回主菜单${C_RESET}"
-        echo -ne "${C_BOLD_CYAN}请输入选项 (0-8):${C_RESET} "
-        read sub_choice
+        echo -ne "${C_BOLD_CYAN}请输入选项 (0-9):${C_RESET} "
+        read -r sub_choice
         case $sub_choice in
-            1) source "$OPENLIST_MODULE"; reset_openlist_password ;;
-            2) source "$OPENLIST_MODULE"; edit_openlist_config ;;
-            3) source "$ARIA2_MODULE"; edit_aria2_config ;;
-            4) source "$ARIA2_MODULE"; update_bt_tracker ;;
-            5) source "$BACKUP_MODULE"; backup_restore_menu ;;
-            6) source "$TUNNEL_MODULE"; setup_cloudflare_tunnel ;;
-            7) source "$TUNNEL_MODULE"; stop_cloudflare_tunnel ;;
-            8) source "$TUNNEL_MODULE"; view_tunnel_log ;;
+            1) reset_openlist_password ;;
+            2) edit_openlist_config ;;
+            3) edit_aria2_config ;;
+            4) update_bt_tracker ;;
+            5) backup_restore_menu ;;
+            6) setup_cloudflare_tunnel ;;
+            7) stop_cloudflare_tunnel ;;
+            8) view_tunnel_log ;;
+            9) uninstall_all ;;
             0) break ;;
-            *) echo -e "${ERROR} 无效选项，请输入 0-8。"; read ;;
+            *) echo -e "${ERROR} 无效选项，请输入 0-9。"; read -r ;;
         esac
     done
 }
@@ -358,23 +395,28 @@ show_menu() {
 
 # ========== 主程序流程 ==========
 init_paths
+source "$SCRIPT_DIR/common.sh"
 load_env
 check_modules
+source "$OPENLIST_MODULE"
+source "$ARIA2_MODULE"
+source "$BACKUP_MODULE"
+source "$TUNNEL_MODULE"
 ensure_oplist_shortcut
 
 while true; do
     show_menu
     check_version_bg
-    read choice
+    read -r choice
     case $choice in
-        1) source "$OPENLIST_MODULE"; install_openlist; echo -e "${C_BOLD_MAGENTA}按回车键返回菜单...${C_RESET}"; read ;;
-        2) source "$OPENLIST_MODULE"; update_openlist; echo -e "${C_BOLD_MAGENTA}按回车键返回菜单...${C_RESET}"; read ;;
-        3) start_all; echo -e "${C_BOLD_MAGENTA}按回车键返回菜单...${C_RESET}"; read ;;
-        4) stop_all; echo -e "${C_BOLD_MAGENTA}按回车键返回菜单...${C_RESET}"; read ;;
-        5) source "$OPENLIST_MODULE"; view_openlist_log ;;
-        6) source "$ARIA2_MODULE"; view_aria2_log ;;
+        1) install_openlist; wait_enter ;;
+        2) update_openlist; wait_enter ;;
+        3) start_all; wait_enter ;;
+        4) stop_all; wait_enter ;;
+        5) view_openlist_log ;;
+        6) view_aria2_log ;;
         7) show_more_menu ;;
         0) echo -e "${INFO} 退出程序。"; exit 0 ;;
-        *) echo -e "${ERROR} 无效选项，请输入 0-7。"; echo -e "${C_BOLD_MAGENTA}按回车键返回菜单...${C_RESET}"; read ;;
+        *) echo -e "${ERROR} 无效选项，请输入 0-7。"; wait_enter ;;
     esac
 done

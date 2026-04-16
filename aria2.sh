@@ -4,20 +4,7 @@
 # 负责 aria2 的配置、启动、更新等相关操作
 # 说明：配置思路参考 P3TERX/aria2.conf，并按 Android Termux 环境做了裁剪与适配
 
-# 颜色定义
-C_BOLD_BLUE="\033[1;34m"
-C_BOLD_GREEN="\033[1;32m"
-C_BOLD_YELLOW="\033[1;33m"
-C_BOLD_RED="\033[1;31m"
-C_BOLD_CYAN="\033[1;36m"
-C_BOLD_MAGENTA="\033[1;35m"
-C_BOLD_LIME="\033[38;5;118m"
-C_RESET="\033[0m"
-
-INFO="${C_BOLD_BLUE}[INFO]${C_RESET}"
-ERROR="${C_BOLD_RED}[ERROR]${C_RESET}"
-SUCCESS="${C_BOLD_GREEN}[OK]${C_RESET}"
-WARN="${C_BOLD_YELLOW}[WARN]${C_RESET}"
+source "${SCRIPT_DIR:-.}/common.sh"
 
 # 上游参考
 P3TERX_DHT_DAT_URLS=(
@@ -335,8 +322,7 @@ edit_aria2_config() {
     echo -e "${INFO} 正在编辑 aria2 配置文件：${C_BOLD_YELLOW}$ARIA2_CONF${C_RESET}"
     vi "$ARIA2_CONF"
     echo -e "${SUCCESS} aria2 配置文件编辑完成。"
-    echo -e "${C_BOLD_MAGENTA}按回车键返回菜单...${C_RESET}"
-    read
+    wait_enter
 }
 
 view_aria2_log() {
@@ -349,8 +335,7 @@ view_aria2_log() {
     else
         echo -e "${ERROR} 未找到 aria2 日志文件：${C_BOLD_YELLOW}$ARIA2_LOG${C_RESET}"
     fi
-    echo -e "${C_BOLD_MAGENTA}按回车键返回菜单...${C_RESET}"
-    read
+    wait_enter
 }
 
 fetch_trackers() {
@@ -380,10 +365,14 @@ apply_trackers_via_rpc() {
 
     [ -n "$rpc_port" ] || return 1
 
+    local escaped_secret escaped_trackers
+    escaped_secret=$(escape_json_value "${rpc_secret:-}")
+    escaped_trackers=$(escape_json_value "$trackers")
+
     if [ -n "$rpc_secret" ]; then
-        payload='{"jsonrpc":"2.0","method":"aria2.changeGlobalOption","id":"openlist_termux","params":["token:'"${rpc_secret}"'",{"bt-tracker":"'"${trackers}"'"}]}'
+        payload="{\"jsonrpc\":\"2.0\",\"method\":\"aria2.changeGlobalOption\",\"id\":\"openlist_termux\",\"params\":[\"token:${escaped_secret}\",{\"bt-tracker\":\"${escaped_trackers}\"}]}"
     else
-        payload='{"jsonrpc":"2.0","method":"aria2.changeGlobalOption","id":"openlist_termux","params":[{"bt-tracker":"'"${trackers}"'"}]}'
+        payload="{\"jsonrpc\":\"2.0\",\"method\":\"aria2.changeGlobalOption\",\"id\":\"openlist_termux\",\"params\":[{\"bt-tracker\":\"${escaped_trackers}\"}]}"
     fi
 
     curl -fsS -H 'Content-Type: application/json' -d "$payload" "http://127.0.0.1:${rpc_port}/jsonrpc" >/dev/null 2>&1
@@ -403,8 +392,7 @@ update_bt_tracker() {
     trackers=$(fetch_trackers)
     if [ -z "$trackers" ]; then
         echo -e "${ERROR} 获取 BT Tracker 失败，请检查网络后重试。"
-        echo -e "${C_BOLD_MAGENTA}按回车键返回菜单...${C_RESET}"
-        read
+        wait_enter
         return 1
     fi
 
@@ -421,8 +409,7 @@ update_bt_tracker() {
         echo -e "${INFO} 若 aria2 正在运行但未同步成功，可重启 aria2 生效。"
     fi
 
-    echo -e "${C_BOLD_MAGENTA}按回车键返回菜单...${C_RESET}"
-    read
+    wait_enter
 }
 
 check_aria2_process() {
@@ -434,11 +421,11 @@ enable_autostart_aria2() {
     local boot_file="$HOME/.termux/boot/aria2_autostart.sh"
     cat > "$boot_file" <<EOF
 #!/data/data/com.termux/files/usr/bin/bash
-termux-wake-lock
+command -v termux-wake-lock >/dev/null 2>&1 && termux-wake-lock
 mkdir -p "$(dirname "$ARIA2_LOG")"
 ARIA2_CMD="$ARIA2_CMD"
 ARIA2_CONF="$ARIA2_CONF"
-\$ARIA2_CMD --conf-path="\$ARIA2_CONF" > "$ARIA2_LOG" 2>&1 &
+nohup "\$ARIA2_CMD" --conf-path="\$ARIA2_CONF" > "$ARIA2_LOG" 2>&1 < /dev/null &
 EOF
     chmod +x "$boot_file"
     echo -e "${SUCCESS} aria2 已成功设置开机自启"
@@ -463,11 +450,11 @@ start_aria2() {
     fi
 
     mkdir -p "$ARIA2_DIR"
+    rotate_log "$ARIA2_LOG"
     echo -e "${INFO} 启动 aria2 ..."
-    "$ARIA2_CMD" --conf-path="$ARIA2_CONF" > "$ARIA2_LOG" 2>&1 &
+    ARIA2_PID=$(start_detached_process "$ARIA2_LOG" "$ARIA2_CMD" --conf-path="$ARIA2_CONF")
     sleep 2
 
-    ARIA2_PID=$(pgrep -f "$ARIA2_CMD --conf-path=$ARIA2_CONF" | head -n 1)
     if [ -n "$ARIA2_PID" ] && ps -p "$ARIA2_PID" >/dev/null 2>&1; then
         echo -e "${SUCCESS} aria2 已启动 (PID: ${C_BOLD_YELLOW}$ARIA2_PID${C_RESET})."
         echo -e "${INFO} 配置文件：${C_BOLD_YELLOW}$ARIA2_CONF${C_RESET}"
@@ -475,6 +462,7 @@ start_aria2() {
         echo -e "${INFO} RPC 端口：${C_BOLD_YELLOW}6800${C_RESET}（密钥已从 .env 注入）"
     else
         echo -e "${ERROR} aria2 启动失败。"
+        [ -f "$ARIA2_LOG" ] && tail -n 50 "$ARIA2_LOG"
         return 1
     fi
     return 0
@@ -485,13 +473,9 @@ stop_aria2() {
         PIDS=$(pgrep -f "$ARIA2_CMD --conf-path=$ARIA2_CONF")
         echo -e "${INFO} 检测到 aria2 正在运行，PID：${C_BOLD_YELLOW}$PIDS${C_RESET}"
         echo -e "${INFO} 正在终止 aria2 ..."
-        pkill -f "$ARIA2_CMD --conf-path=$ARIA2_CONF"
-        sleep 1
-        if check_aria2_process; then
-            echo -e "${ERROR} 无法终止 aria2 进程。"
-            return 1
+        if force_kill "$ARIA2_CMD --conf-path=$ARIA2_CONF" "aria2"; then
+            echo -e "${SUCCESS} aria2 已成功终止。"
         fi
-        echo -e "${SUCCESS} aria2 已成功终止。"
     else
         echo -e "${WARN} aria2 未运行。"
     fi
@@ -500,9 +484,9 @@ stop_aria2() {
 
 uninstall_aria2() {
     echo -e "${C_BOLD_RED}!!! 卸载将删除所有 aria2 数据和配置，是否继续？(y/n):${C_RESET}"
-    read confirm
+    read -r confirm
     if [ "$confirm" = "y" ] || [ "$confirm" = "Y" ]; then
-        pkill -f "$ARIA2_CMD"
+        pkill -f "$ARIA2_CMD" 2>/dev/null || true
         if command -v pkg >/dev/null 2>&1; then
             pkg uninstall -y aria2 && apt autoremove -y
         fi
@@ -511,6 +495,5 @@ uninstall_aria2() {
     else
         echo -e "${INFO} 已取消卸载。"
     fi
-    echo -e "${C_BOLD_MAGENTA}按回车键返回菜单...${C_RESET}"
-    read
+    wait_enter
 }

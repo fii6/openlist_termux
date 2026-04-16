@@ -3,19 +3,7 @@
 # ========== Cloudflare Tunnel 专用模块 ==========
 # 负责 Cloudflare Tunnel 的配置、启动、停止等相关操作
 
-# 颜色定义
-C_BOLD_BLUE="\033[1;34m"
-C_BOLD_GREEN="\033[1;32m"
-C_BOLD_YELLOW="\033[1;33m"
-C_BOLD_RED="\033[1;31m"
-C_BOLD_CYAN="\033[1;36m"
-C_BOLD_MAGENTA="\033[1;35m"
-C_RESET="\033[0m"
-
-INFO="${C_BOLD_BLUE}[INFO]${C_RESET}"
-ERROR="${C_BOLD_RED}[ERROR]${C_RESET}"
-SUCCESS="${C_BOLD_GREEN}[OK]${C_RESET}"
-WARN="${C_BOLD_YELLOW}[WARN]${C_RESET}"
+source "${SCRIPT_DIR:-.}/common.sh"
 
 get_tunnel_info() {
     if [ -z "$TUNNEL_NAME" ] || [ -z "$DOMAIN" ] || [ -z "$LOCAL_PORT" ]; then
@@ -69,7 +57,7 @@ setup_cloudflare_tunnel() {
     get_tunnel_info || return 1
     ensure_cloudflared || return 1
 
-    cd "$CONFIG_DIR" || {
+    pushd "$CONFIG_DIR" >/dev/null || {
         echo -e "${ERROR} 无法切换到 $CONFIG_DIR"
         return 1
     }
@@ -79,10 +67,12 @@ setup_cloudflare_tunnel() {
         echo -e "${INFO} 如果 Termux 未打开浏览器，请手动复制 URL 到浏览器"
         cloudflared tunnel login || {
             echo -e "${ERROR} Cloudflare 授权失败，请检查网络或稍后重试"
+            popd >/dev/null || true
             return 1
         }
         if [ ! -f "cert.pem" ]; then
             echo -e "${ERROR} 授权后仍未生成 cert.pem 文件，请检查 Cloudflare 账户权限或重新运行 'cloudflared tunnel login'"
+            popd >/dev/null || true
             return 1
         fi
     fi
@@ -91,6 +81,7 @@ setup_cloudflare_tunnel() {
         echo -e "${INFO} 创建隧道: $TUNNEL_NAME"
         cloudflared tunnel create "$TUNNEL_NAME" || {
             echo -e "${ERROR} 隧道创建失败，请检查 Cloudflare 配置或网络"
+            popd >/dev/null || true
             return 1
         }
     fi
@@ -98,6 +89,7 @@ setup_cloudflare_tunnel() {
     uuid=$(get_tunnel_uuid)
     if [ -z "$uuid" ]; then
         echo -e "${ERROR} 未能获取隧道 UUID，检查隧道是否创建成功"
+        popd >/dev/null || true
         return 1
     fi
 
@@ -105,6 +97,7 @@ setup_cloudflare_tunnel() {
     if [ ! -f "$cred_file" ]; then
         echo -e "${ERROR} 隧道凭证文件 $cred_file 不存在，请尝试重新创建隧道或检查权限"
         echo -e "${INFO} 可尝试运行：cloudflared tunnel delete -f $TUNNEL_NAME && cloudflared tunnel create $TUNNEL_NAME"
+        popd >/dev/null || true
         return 1
     fi
 
@@ -121,6 +114,7 @@ setup_cloudflare_tunnel() {
     echo -e "${INFO} 配置 DNS 路由: $DOMAIN"
     cloudflared tunnel route dns "$TUNNEL_NAME" "$DOMAIN" >/dev/null 2>&1 || {
         echo -e "${ERROR} DNS 路由配置失败，请检查 Cloudflare 账户权限或域名配置"
+        popd >/dev/null || true
         return 1
     }
 
@@ -131,10 +125,12 @@ setup_cloudflare_tunnel() {
     fi
 
     echo -e "${INFO} 正在启动 Cloudflare Tunnel..."
-    cloudflared tunnel --config "$CF_CONFIG" --no-autoupdate --protocol http2 run "$TUNNEL_NAME" > "$CF_LOG" 2>&1 &
+    TUNNEL_PID=$(start_detached_process "$CF_LOG" cloudflared tunnel --config "$CF_CONFIG" --no-autoupdate --protocol http2 run "$TUNNEL_NAME")
     sleep 3
 
-    if pgrep -f "cloudflared.*$TUNNEL_NAME" >/dev/null; then
+    popd >/dev/null || true
+
+    if [ -n "$TUNNEL_PID" ] && ps -p "$TUNNEL_PID" >/dev/null 2>&1; then
         echo -e "${SUCCESS} 隧道已启动，日志输出至: $CF_LOG"
         echo -e "${INFO} 访问地址: https://$DOMAIN"
     else
@@ -143,8 +139,7 @@ setup_cloudflare_tunnel() {
         return 1
     fi
 
-    echo -e "${C_BOLD_MAGENTA}按回车键返回菜单...${C_RESET}"
-    read
+    wait_enter
     return 0
 }
 
@@ -154,18 +149,13 @@ stop_cloudflare_tunnel() {
         PIDS=$(pgrep -f "cloudflared.*$TUNNEL_NAME")
         echo -e "${INFO} 检测到 Cloudflare Tunnel 正在运行，PID：${C_BOLD_YELLOW}$PIDS${C_RESET}"
         echo -e "${INFO} 正在终止 Cloudflare Tunnel..."
-        pkill -f "cloudflared.*$TUNNEL_NAME"
-        sleep 1
-        if pgrep -f "cloudflared.*$TUNNEL_NAME" >/dev/null; then
-            echo -e "${ERROR} 无法终止 Cloudflare Tunnel 进程。"
-            return 1
+        if force_kill "cloudflared.*$TUNNEL_NAME" "Cloudflare Tunnel"; then
+            echo -e "${SUCCESS} Cloudflare Tunnel 已成功终止。"
         fi
-        echo -e "${SUCCESS} Cloudflare Tunnel 已成功终止。"
     else
         echo -e "${WARN} Cloudflare Tunnel 未运行。"
     fi
-    echo -e "${C_BOLD_MAGENTA}按回车键返回菜单...${C_RESET}"
-    read
+    wait_enter
     return 0
 }
 
@@ -179,8 +169,7 @@ view_tunnel_log() {
     else
         echo -e "${ERROR} 未找到 Cloudflare Tunnel 日志文件：${C_BOLD_YELLOW}$CF_LOG${C_RESET}"
     fi
-    echo -e "${C_BOLD_MAGENTA}按回车键返回菜单...${C_RESET}"
-    read
+    wait_enter
 }
 
 enable_autostart_tunnel() {
@@ -189,7 +178,7 @@ enable_autostart_tunnel() {
     cat > "$boot_file" <<EOF
 #!/data/data/com.termux/files/usr/bin/bash
 command -v termux-wake-lock >/dev/null 2>&1 && termux-wake-lock
-cloudflared tunnel --config "$CF_CONFIG" --no-autoupdate --protocol http2 run "$TUNNEL_NAME" > "$CF_LOG" 2>&1 &
+nohup cloudflared tunnel --config "$CF_CONFIG" --no-autoupdate --protocol http2 run "$TUNNEL_NAME" > "$CF_LOG" 2>&1 < /dev/null &
 EOF
     chmod +x "$boot_file"
     echo -e "${SUCCESS} Cloudflare Tunnel 已成功设置开机自启"
@@ -205,7 +194,7 @@ disable_autostart_tunnel() {
 
 uninstall_tunnel() {
     echo -e "${C_BOLD_RED}!!! 卸载将删除所有 Cloudflare Tunnel 配置和凭证，是否继续？(y/n):${C_RESET}"
-    read confirm
+    read -r confirm
     if [ "$confirm" = "y" ] || [ "$confirm" = "Y" ]; then
         pkill -f "cloudflared" 2>/dev/null || true
         disable_autostart_tunnel >/dev/null 2>&1 || true
@@ -217,6 +206,5 @@ uninstall_tunnel() {
     else
         echo -e "${INFO} 已取消卸载。"
     fi
-    echo -e "${C_BOLD_MAGENTA}按回车键返回菜单...${C_RESET}"
-    read
+    wait_enter
 }
