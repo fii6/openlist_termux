@@ -151,6 +151,17 @@ restore_openlist() {
         if [ -n "$current_backup" ]; then
             echo -e "${INFO} 旧数据已备份到：${C_BOLD_YELLOW}$current_backup${C_RESET}"
         fi
+
+        # 自动清理旧的还原残留目录（保留本次生成的）
+        local old_dirs=()
+        mapfile -t old_dirs < <(ls -1dt "$DEST_DIR"/data.pre-restore.* 2>/dev/null)
+        for d in "${old_dirs[@]}"; do
+            [ "$d" = "$current_backup" ] && continue
+            rm -rf "$d"
+        done
+        if [ ${#old_dirs[@]} -gt 1 ]; then
+            echo -e "${INFO} 已自动清理 $((${#old_dirs[@]} - 1)) 个旧的还原残留目录。"
+        fi
     else
         rm -rf "$DATA_DIR"
         if [ -n "$current_backup" ] && [ -d "$current_backup" ]; then
@@ -168,56 +179,6 @@ restore_openlist() {
     return 0
 }
 
-# ========== 清理还原残留 ==========
-cleanup_pre_restore() {
-    echo -e "${C_BOLD_BLUE}┌──────────────────────────┐${C_RESET}"
-    echo -e "${C_BOLD_BLUE}│  清理还原残留目录        │${C_RESET}"
-    echo -e "${C_BOLD_BLUE}└──────────────────────────┘${C_RESET}"
-    echo ""
-
-    local dirs=()
-    mapfile -t dirs < <(ls -1dt "$DEST_DIR"/data.pre-restore.* 2>/dev/null)
-
-    if [ ${#dirs[@]} -eq 0 ]; then
-        echo -e "${INFO} 没有发现还原残留目录。"
-        echo ""
-        wait_enter
-        return 0
-    fi
-
-    echo -e "${INFO} 发现 ${C_BOLD_YELLOW}${#dirs[@]}${C_RESET} 个还原残留目录："
-    echo ""
-
-    local total_size=0
-    for d in "${dirs[@]}"; do
-        local dir_size
-        dir_size=$(du -sh "$d" 2>/dev/null | cut -f1)
-        local dir_time
-        dir_time=$(stat -c %y "$d" 2>/dev/null | cut -d' ' -f1,2)
-        echo -e "  ${C_BOLD_YELLOW}-${C_RESET} $(basename "$d")  (${dir_size}, ${dir_time})"
-    done
-
-    local total
-    total=$(du -shc "${dirs[@]}" 2>/dev/null | tail -n1 | cut -f1)
-    echo ""
-    echo -e "${INFO} 总占用空间：${C_BOLD_YELLOW}${total}${C_RESET}"
-    echo ""
-    echo -ne "${C_BOLD_RED}确定删除全部还原残留目录？(y/n):${C_RESET} "
-    read -r confirm
-
-    if [ "$confirm" = "y" ] || [ "$confirm" = "Y" ]; then
-        for d in "${dirs[@]}"; do
-            rm -rf "$d"
-        done
-        echo -e "${SUCCESS} 已清理全部还原残留目录。"
-    else
-        echo -e "${INFO} 已取消清理。"
-    fi
-
-    echo ""
-    wait_enter
-}
-
 # ========== 备份还原菜单 ==========
 backup_restore_menu() {
     echo -e "${C_BOLD_BLUE}┌──────────────────────────┐${C_RESET}"
@@ -226,15 +187,13 @@ backup_restore_menu() {
     echo ""
     echo -e "${C_BOLD_GREEN}1. 备份 OpenList 配置${C_RESET}"
     echo -e "${C_BOLD_YELLOW}2. 还原 OpenList 配置${C_RESET}"
-    echo -e "${C_BOLD_RED}3. 清理还原残留目录${C_RESET}"
     echo -e "${C_BOLD_GRAY}0. 返回${C_RESET}"
     echo ""
-    echo -ne "${C_BOLD_CYAN}请选择操作 (0-3):${C_RESET} "
+    echo -ne "${C_BOLD_CYAN}请选择操作 (0-2):${C_RESET} "
     read -r br_choice
     case $br_choice in
         1) backup_openlist ;;
         2) restore_openlist ;;
-        3) cleanup_pre_restore ;;
         *) ;;
     esac
 }
