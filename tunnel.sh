@@ -51,6 +51,29 @@ credentials-file: $cred_file
 EOF
 }
 
+tunnel_log_has_connection() {
+    [ -f "$CF_LOG" ] && grep -q "Registered tunnel connection" "$CF_LOG"
+}
+
+tunnel_log_has_edge_error() {
+    [ -f "$CF_LOG" ] && grep -Eq "TLS handshake with edge error|Unable to establish connection with Cloudflare edge|Serve tunnel error" "$CF_LOG"
+}
+
+wait_for_tunnel_connection() {
+    local timeout="${1:-12}"
+    local elapsed=0
+
+    while [ "$elapsed" -lt "$timeout" ]; do
+        if tunnel_log_has_connection; then
+            return 0
+        fi
+        sleep 1
+        elapsed=$((elapsed + 1))
+    done
+
+    return 1
+}
+
 setup_cloudflare_tunnel() {
     local uuid cred_file
 
@@ -125,16 +148,22 @@ setup_cloudflare_tunnel() {
     fi
 
     echo -e "${INFO} 正在启动 Cloudflare Tunnel..."
-    TUNNEL_PID=$(start_detached_process "$CF_LOG" cloudflared tunnel --config "$CF_CONFIG" --no-autoupdate --protocol http2 run "$TUNNEL_NAME")
-    sleep 3
+    TUNNEL_PID=$(start_detached_process "$CF_LOG" cloudflared tunnel --config "$CF_CONFIG" --no-autoupdate run "$TUNNEL_NAME")
 
     popd >/dev/null || true
 
-    if [ -n "$TUNNEL_PID" ] && ps -p "$TUNNEL_PID" >/dev/null 2>&1; then
+    if [ -n "$TUNNEL_PID" ] && ps -p "$TUNNEL_PID" >/dev/null 2>&1 && wait_for_tunnel_connection 12; then
         echo -e "${SUCCESS} 隧道已启动，日志输出至: $CF_LOG"
         echo -e "${INFO} 访问地址: https://$DOMAIN"
+    elif [ -n "$TUNNEL_PID" ] && ps -p "$TUNNEL_PID" >/dev/null 2>&1; then
+        echo -e "${ERROR} Cloudflare Tunnel 进程已启动，但未与 Cloudflare Edge 建立连接。"
+        if tunnel_log_has_edge_error; then
+            echo -e "${INFO} 日志显示 Edge TLS 握手失败，请优先检查网络环境，避免强制使用固定传输协议。"
+        fi
+        [ -f "$CF_LOG" ] && tail -n 50 "$CF_LOG"
+        return 1
     else
-        echo -e "${ERROR} 隧道启动失败，请检查 $CF_LOG 或确保 $cred_file 有效"
+        echo -e "${ERROR} 隧道启动失败，请检查 $CF_LOG 或确保 $cred_file 有效。"
         [ -f "$CF_LOG" ] && tail -n 50 "$CF_LOG"
         return 1
     fi
@@ -178,7 +207,7 @@ enable_autostart_tunnel() {
     cat > "$boot_file" <<EOF
 #!/data/data/com.termux/files/usr/bin/bash
 command -v termux-wake-lock >/dev/null 2>&1 && termux-wake-lock
-nohup cloudflared tunnel --config "$CF_CONFIG" --no-autoupdate --protocol http2 run "$TUNNEL_NAME" > "$CF_LOG" 2>&1 < /dev/null &
+nohup cloudflared tunnel --config "$CF_CONFIG" --no-autoupdate run "$TUNNEL_NAME" > "$CF_LOG" 2>&1 < /dev/null &
 EOF
     chmod +x "$boot_file"
     echo -e "${SUCCESS} Cloudflare Tunnel 已成功设置开机自启"

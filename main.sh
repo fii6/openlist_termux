@@ -214,7 +214,13 @@ tunnel_status_line() {
     fi
     if pgrep -f "cloudflared.*$TUNNEL_NAME" >/dev/null; then
         PIDS=$(pgrep -f "cloudflared.*$TUNNEL_NAME")
-        echo -e "${INFO} 隧道状态：${C_BOLD_GREEN}运行中 (PID: $PIDS)${C_RESET}"
+        if tunnel_log_has_connection; then
+            echo -e "${INFO} 隧道状态：${C_BOLD_GREEN}已连接 (PID: $PIDS)${C_RESET}"
+        elif tunnel_log_has_edge_error; then
+            echo -e "${INFO} 隧道状态：${C_BOLD_YELLOW}进程运行中，但未连通 Edge (PID: $PIDS)${C_RESET}"
+        else
+            echo -e "${INFO} 隧道状态：${C_BOLD_YELLOW}启动中 (PID: $PIDS)${C_RESET}"
+        fi
     else
         echo -e "${INFO} 隧道状态：${C_BOLD_RED}未运行${C_RESET}"
     fi
