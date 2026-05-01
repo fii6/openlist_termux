@@ -1,0 +1,8 @@
+#!/data/data/com.termux/files/usr/bin/sh
+# svlogd target for cloudflared.
+
+HOME_DIR="${HOME:-/data/data/com.termux/files/home}"
+LOG_DIR="$HOME_DIR/.cloudflared/log/sv"
+
+mkdir -p "$LOG_DIR"
+exec svlogd -tt "$LOG_DIR"

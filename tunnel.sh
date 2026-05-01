@@ -1,7 +1,7 @@
 #!/data/data/com.termux/files/usr/bin/bash
 
 # ========== Cloudflare Tunnel 专用模块 ==========
-# 负责 Cloudflare Tunnel 的配置、启动、停止等相关操作
+# 负责 Cloudflare Tunnel 的配置、启动、停止等相关操作（runit 接管启停）
 
 source "${SCRIPT_DIR:-.}/common.sh"
 
@@ -52,11 +52,20 @@ EOF
 }
 
 tunnel_log_has_connection() {
+    local svlog="$HOME/.cloudflared/log/sv/current"
+    if [ -f "$svlog" ] && grep -q "Registered tunnel connection" "$svlog"; then
+        return 0
+    fi
     [ -f "$CF_LOG" ] && grep -q "Registered tunnel connection" "$CF_LOG"
 }
 
 tunnel_log_has_edge_error() {
-    [ -f "$CF_LOG" ] && grep -Eq "TLS handshake with edge error|Unable to establish connection with Cloudflare edge|Serve tunnel error" "$CF_LOG"
+    local svlog="$HOME/.cloudflared/log/sv/current"
+    local pat="TLS handshake with edge error|Unable to establish connection with Cloudflare edge|Serve tunnel error"
+    if [ -f "$svlog" ] && grep -Eq "$pat" "$svlog"; then
+        return 0
+    fi
+    [ -f "$CF_LOG" ] && grep -Eq "$pat" "$CF_LOG"
 }
 
 wait_for_tunnel_connection() {
@@ -72,6 +81,20 @@ wait_for_tunnel_connection() {
     done
 
     return 1
+}
+
+migrate_legacy_tunnel() {
+    if pgrep -f "cloudflared.*${TUNNEL_NAME:-__none__}" >/dev/null 2>&1 && ! service_running cloudflared; then
+        echo -e "${INFO} 检测到遗留的 cloudflared nohup 进程，正在迁移到 runit 监督..."
+        force_kill "cloudflared.*$TUNNEL_NAME" "Cloudflare Tunnel" >/dev/null 2>&1 || true
+    fi
+}
+
+ensure_tunnel_service() {
+    ensure_termux_services || return 1
+    install_service cloudflared "${ENV_FILE:-$HOME/.env}" || return 1
+    ensure_runsvdir_running || return 1
+    return 0
 }
 
 setup_cloudflare_tunnel() {
@@ -141,30 +164,49 @@ setup_cloudflare_tunnel() {
         return 1
     }
 
-    if pgrep -f "cloudflared.*$TUNNEL_NAME" >/dev/null; then
-        echo -e "${WARN} 隧道 $TUNNEL_NAME 已在运行，尝试停止..."
-        pkill -f "cloudflared.*$TUNNEL_NAME" || true
-        sleep 2
-    fi
-
-    echo -e "${INFO} 正在启动 Cloudflare Tunnel..."
-    TUNNEL_PID=$(start_detached_process "$CF_LOG" cloudflared tunnel --config "$CF_CONFIG" --no-autoupdate run "$TUNNEL_NAME")
-
     popd >/dev/null || true
 
-    if [ -n "$TUNNEL_PID" ] && ps -p "$TUNNEL_PID" >/dev/null 2>&1 && wait_for_tunnel_connection 12; then
-        echo -e "${SUCCESS} 隧道已启动，日志输出至: $CF_LOG"
+    migrate_legacy_tunnel
+    ensure_tunnel_service || return 1
+
+    # 隧道每次配置后强制重启，确保新的 .env 路径与配置生效
+    if service_running cloudflared; then
+        echo -e "${INFO} cloudflared 服务已在运行，重启以应用新配置..."
+        sv restart cloudflared >/dev/null 2>&1 || true
+    else
+        echo -e "${INFO} 正在启动 Cloudflare Tunnel (sv up cloudflared)..."
+        sv up cloudflared >/dev/null 2>&1 || true
+    fi
+
+    # 等待进程启动 + Edge 连接建立
+    local i=0
+    while [ "$i" -lt 6 ]; do
+        if service_running cloudflared; then
+            break
+        fi
+        sleep 1
+        i=$((i + 1))
+    done
+
+    if ! service_running cloudflared; then
+        echo -e "${ERROR} 隧道启动失败，请检查日志或确保 $cred_file 有效。"
+        sv status cloudflared 2>/dev/null || true
+        local svlog="$HOME/.cloudflared/log/sv/current"
+        [ -f "$svlog" ] && tail -n 50 "$svlog"
+        return 1
+    fi
+
+    if wait_for_tunnel_connection 12; then
+        echo -e "${SUCCESS} 隧道已启动 (runit 监督)"
+        echo -e "${INFO} 日志目录：${C_BOLD_YELLOW}$HOME/.cloudflared/log/sv/${C_RESET}"
         echo -e "${INFO} 访问地址: https://$DOMAIN"
-    elif [ -n "$TUNNEL_PID" ] && ps -p "$TUNNEL_PID" >/dev/null 2>&1; then
+    else
         echo -e "${ERROR} Cloudflare Tunnel 进程已启动，但未与 Cloudflare Edge 建立连接。"
         if tunnel_log_has_edge_error; then
             echo -e "${INFO} 日志显示 Edge TLS 握手失败，请优先检查网络环境，避免强制使用固定传输协议。"
         fi
-        [ -f "$CF_LOG" ] && tail -n 50 "$CF_LOG"
-        return 1
-    else
-        echo -e "${ERROR} 隧道启动失败，请检查 $CF_LOG 或确保 $cred_file 有效。"
-        [ -f "$CF_LOG" ] && tail -n 50 "$CF_LOG"
+        local svlog="$HOME/.cloudflared/log/sv/current"
+        [ -f "$svlog" ] && tail -n 50 "$svlog"
         return 1
     fi
 
@@ -174,15 +216,44 @@ setup_cloudflare_tunnel() {
 
 stop_cloudflare_tunnel() {
     get_tunnel_info || return 1
-    if pgrep -f "cloudflared.*$TUNNEL_NAME" >/dev/null; then
-        PIDS=$(pgrep -f "cloudflared.*$TUNNEL_NAME")
-        echo -e "${INFO} 检测到 Cloudflare Tunnel 正在运行，PID：${C_BOLD_YELLOW}$PIDS${C_RESET}"
-        echo -e "${INFO} 正在终止 Cloudflare Tunnel..."
-        if force_kill "cloudflared.*$TUNNEL_NAME" "Cloudflare Tunnel"; then
-            echo -e "${SUCCESS} Cloudflare Tunnel 已成功终止。"
+
+    # 老 nohup 进程兜底
+    if pgrep -f "cloudflared.*$TUNNEL_NAME" >/dev/null 2>&1 && ! service_running cloudflared; then
+        echo -e "${INFO} 终止遗留的 cloudflared 进程..."
+        force_kill "cloudflared.*$TUNNEL_NAME" "Cloudflare Tunnel" >/dev/null 2>&1 || true
+    fi
+
+    if ! [ -d "$SV_DIR/cloudflared" ]; then
+        if pgrep -f "cloudflared" >/dev/null 2>&1; then
+            return 0
         fi
-    else
         echo -e "${WARN} Cloudflare Tunnel 未运行。"
+        wait_enter
+        return 0
+    fi
+
+    echo -e "${INFO} 正在停止 Cloudflare Tunnel (sv down cloudflared)..."
+    sv down cloudflared >/dev/null 2>&1 || true
+
+    local i=0
+    while [ "$i" -lt 6 ]; do
+        if ! service_running cloudflared; then
+            break
+        fi
+        sleep 1
+        i=$((i + 1))
+    done
+
+    if service_running cloudflared; then
+        echo -e "${WARN} cloudflared 未响应，强制终止..."
+        sv force-stop cloudflared >/dev/null 2>&1 || true
+        sleep 1
+    fi
+
+    if service_running cloudflared; then
+        echo -e "${ERROR} 无法停止 Cloudflare Tunnel。"
+    else
+        echo -e "${SUCCESS} Cloudflare Tunnel 已成功终止。"
     fi
     wait_enter
     return 0
@@ -192,39 +263,40 @@ view_tunnel_log() {
     echo -e "${C_BOLD_BLUE}┌──────────────────────────┐${C_RESET}"
     echo -e "${C_BOLD_BLUE}│ 查看 Cloudflare Tunnel 日志 │${C_RESET}"
     echo -e "${C_BOLD_BLUE}└──────────────────────────┘${C_RESET}"
-    if [ -f "$CF_LOG" ]; then
+    local svlog="$HOME/.cloudflared/log/sv/current"
+    if [ -f "$svlog" ]; then
+        echo -e "${INFO} 显示 svlogd 当前日志：${C_BOLD_YELLOW}$svlog${C_RESET}"
+        tail -n 200 "$svlog"
+    elif [ -f "$CF_LOG" ]; then
         echo -e "${INFO} 显示 Cloudflare Tunnel 日志文件：${C_BOLD_YELLOW}$CF_LOG${C_RESET}"
         tail -n 200 "$CF_LOG"
     else
-        echo -e "${ERROR} 未找到 Cloudflare Tunnel 日志文件：${C_BOLD_YELLOW}$CF_LOG${C_RESET}"
+        echo -e "${ERROR} 未找到 Cloudflare Tunnel 日志（svlogd 或 $CF_LOG）"
     fi
     wait_enter
 }
 
 enable_autostart_tunnel() {
-    mkdir -p "$HOME/.termux/boot"
-    local boot_file="$HOME/.termux/boot/tunnel_autostart.sh"
-    cat > "$boot_file" <<EOF
-#!/data/data/com.termux/files/usr/bin/bash
-command -v termux-wake-lock >/dev/null 2>&1 && termux-wake-lock
-nohup cloudflared tunnel --config "$CF_CONFIG" --no-autoupdate run "$TUNNEL_NAME" > "$CF_LOG" 2>&1 < /dev/null &
-EOF
-    chmod +x "$boot_file"
-    echo -e "${SUCCESS} Cloudflare Tunnel 已成功设置开机自启"
+    ensure_tunnel_service || return 1
+    write_services_boot_file
+    clean_legacy_boot_files
+    service_enable_autostart cloudflared
+    echo -e "${SUCCESS} Cloudflare Tunnel 已成功设置开机自启（runit 监督）"
 }
 
 disable_autostart_tunnel() {
-    local boot_file="$HOME/.termux/boot/tunnel_autostart.sh"
-    if [ -f "$boot_file" ]; then
-        rm -f "$boot_file"
-        echo -e "${INFO} 已禁用 Cloudflare Tunnel 开机自启"
+    if [ -d "$SV_DIR/cloudflared" ]; then
+        service_disable_autostart cloudflared
+        echo -e "${INFO} 已禁用 Cloudflare Tunnel 开机自启（保留服务定义）"
     fi
+    rm -f "$HOME/.termux/boot/tunnel_autostart.sh"
 }
 
 uninstall_tunnel() {
     echo -e "${C_BOLD_RED}!!! 卸载将删除所有 Cloudflare Tunnel 配置和凭证，是否继续？(y/n):${C_RESET}"
     read -r confirm
     if [ "$confirm" = "y" ] || [ "$confirm" = "Y" ]; then
+        remove_service cloudflared
         pkill -f "cloudflared" 2>/dev/null || true
         disable_autostart_tunnel >/dev/null 2>&1 || true
         if command -v pkg >/dev/null 2>&1; then

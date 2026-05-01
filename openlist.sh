@@ -138,11 +138,15 @@ view_openlist_log() {
     echo -e "${C_BOLD_BLUE}┌──────────────────────────┐${C_RESET}"
     echo -e "${C_BOLD_BLUE}│ 查看 OpenList 日志       │${C_RESET}"
     echo -e "${C_BOLD_BLUE}└──────────────────────────┘${C_RESET}"
+    local svlog="$HOME/Openlist/data/log/sv/current"
     if [ -f "$OPENLIST_LOG" ]; then
-        echo -e "${INFO} 显示 OpenList 日志文件：${C_BOLD_YELLOW}$OPENLIST_LOG${C_RESET}"
+        echo -e "${INFO} 显示 OpenList 主日志：${C_BOLD_YELLOW}$OPENLIST_LOG${C_RESET}"
         tail -n 200 "$OPENLIST_LOG"
+    elif [ -f "$svlog" ]; then
+        echo -e "${INFO} 显示 svlogd 当前日志：${C_BOLD_YELLOW}$svlog${C_RESET}"
+        tail -n 200 "$svlog"
     else
-        echo -e "${ERROR} 未找到 OpenList 日志文件：${C_BOLD_YELLOW}$OPENLIST_LOG${C_RESET}"
+        echo -e "${ERROR} 未找到 OpenList 日志（$OPENLIST_LOG 或 svlogd current）"
     fi
     wait_enter
 }
@@ -186,29 +190,43 @@ reset_openlist_password() {
 }
 
 check_openlist_process() {
+    if service_running openlist; then
+        return 0
+    fi
+    # 兼容仍以 nohup 方式残留的旧进程
     pgrep -f "$OPENLIST_BIN server" >/dev/null 2>&1
 }
 
+# 把任何遗留的 nohup OpenList 进程清理掉，让 runit 接管
+migrate_legacy_openlist() {
+    if pgrep -f "$OPENLIST_BIN server" >/dev/null 2>&1 && ! service_running openlist; then
+        echo -e "${INFO} 检测到遗留的 OpenList nohup 进程，正在迁移到 runit 监督..."
+        force_kill "$OPENLIST_BIN server" "OpenList server" >/dev/null 2>&1 || true
+    fi
+}
+
+ensure_openlist_service() {
+    ensure_termux_services || return 1
+    install_service openlist || return 1
+    ensure_runsvdir_running || return 1
+    return 0
+}
+
 enable_autostart_openlist() {
-    mkdir -p "$HOME/.termux/boot"
-    local boot_file="$HOME/.termux/boot/openlist_autostart.sh"
-    cat > "$boot_file" <<EOF
-#!/data/data/com.termux/files/usr/bin/bash
-command -v termux-wake-lock >/dev/null 2>&1 && termux-wake-lock
-mkdir -p "$DEST_DIR" "$DATA_DIR" "$OPENLIST_LOGDIR"
-cd "$DEST_DIR" || exit 1
-nohup "$OPENLIST_BIN" server > "$OPENLIST_LOG" 2>&1 < /dev/null &
-EOF
-    chmod +x "$boot_file"
-    echo -e "${SUCCESS} OpenList 已成功设置开机自启"
+    ensure_openlist_service || return 1
+    write_services_boot_file
+    clean_legacy_boot_files
+    service_enable_autostart openlist
+    echo -e "${SUCCESS} OpenList 已成功设置开机自启（runit 监督）"
 }
 
 disable_autostart_openlist() {
-    local boot_file="$HOME/.termux/boot/openlist_autostart.sh"
-    if [ -f "$boot_file" ]; then
-        rm -f "$boot_file"
-        echo -e "${INFO} 已禁用 OpenList 开机自启"
+    if [ -d "$SV_DIR/openlist" ]; then
+        service_disable_autostart openlist
+        echo -e "${INFO} 已禁用 OpenList 开机自启（保留服务定义）"
     fi
+    # 旧的 nohup 自启脚本若残留，一并清理
+    rm -f "$HOME/.termux/boot/openlist_autostart.sh"
 }
 
 start_openlist() {
@@ -220,9 +238,12 @@ start_openlist() {
     mkdir -p "$DEST_DIR" "$DATA_DIR" "$OPENLIST_LOGDIR"
     rotate_log "$OPENLIST_LOG"
 
-    if check_openlist_process; then
-        PIDS=$(pgrep -f "$OPENLIST_BIN server")
-        echo -e "${WARN} OpenList server 已运行，PID：${C_BOLD_YELLOW}$PIDS${C_RESET}"
+    migrate_legacy_openlist
+    ensure_openlist_service || return 1
+
+    if service_running openlist; then
+        echo -e "${WARN} OpenList server 已在 runit 下运行。"
+        sv status openlist 2>/dev/null
         return 0
     fi
 
@@ -230,44 +251,98 @@ start_openlist() {
         chmod +x "$OPENLIST_BIN"
     fi
 
-    echo -e "${INFO} 启动 OpenList server..."
-    OPENLIST_PID=$(start_detached_process_in_dir "$DEST_DIR" "$OPENLIST_LOG" "$OPENLIST_BIN" server)
-    sleep 3
+    echo -e "${INFO} 启动 OpenList server (sv up openlist)..."
+    sv up openlist >/dev/null 2>&1 || true
 
-    if ! ps -p "$OPENLIST_PID" >/dev/null 2>&1; then
+    # runsv 启动有约 1 秒延迟
+    local i=0
+    while [ "$i" -lt 6 ]; do
+        if service_running openlist; then
+            break
+        fi
+        sleep 1
+        i=$((i + 1))
+    done
+
+    if ! service_running openlist; then
         echo -e "${ERROR} OpenList server 启动失败。"
-        [ -f "$OPENLIST_LOG" ] && tail -n 50 "$OPENLIST_LOG"
+        sv status openlist 2>/dev/null || true
+        local svlog="$HOME/Openlist/data/log/sv/current"
+        [ -f "$svlog" ] && tail -n 50 "$svlog"
         return 1
     fi
 
-    echo -e "${SUCCESS} OpenList server 已启动 (PID: ${C_BOLD_YELLOW}$OPENLIST_PID${C_RESET})."
-    if [ -f "$OPENLIST_LOG" ]; then
-        PASSWORD=$(sed -n 's/.*initial password is: \([^[:space:]]\+\).*/\1/p' "$OPENLIST_LOG" | head -n 1)
-        if [ -n "$PASSWORD" ]; then
-            echo -e "${SUCCESS} 检测到 OpenList 初始账户信息："
-            echo -e "    用户名：${C_BOLD_YELLOW}admin${C_RESET}"
-            echo -e "    密码：  ${C_BOLD_YELLOW}$PASSWORD${C_RESET}"
-        else
-            echo -e "${INFO} 非首次启动未在日志中找到初始密码，请使用您设置的密码。"
+    local pid
+    pid=$(sv status openlist 2>/dev/null | sed -n 's/^run: openlist: (pid \([0-9]\+\)).*/\1/p')
+    echo -e "${SUCCESS} OpenList server 已启动 (PID: ${C_BOLD_YELLOW}${pid:-?}${C_RESET})."
+
+    # 轮询 svlogd 当前日志直到出现初始密码（最长 12s）。
+    # openlist 首次启动时会把 "initial password is: ..." 打到 stdout，
+    # 经 runsv → svlogd → current 写入文件，需要给 IO 一点时间。
+    local svlog="$HOME/Openlist/data/log/sv/current"
+    local PASSWORD=""
+    local k=0
+    while [ "$k" -lt 12 ]; do
+        if [ -f "$svlog" ]; then
+            PASSWORD=$(sed -n 's/.*initial password is: \([^[:space:]]\+\).*/\1/p' "$svlog" | head -n 1)
+            [ -n "$PASSWORD" ] && break
         fi
+        if [ -f "$OPENLIST_LOG" ]; then
+            PASSWORD=$(sed -n 's/.*initial password is: \([^[:space:]]\+\).*/\1/p' "$OPENLIST_LOG" | head -n 1)
+            [ -n "$PASSWORD" ] && break
+        fi
+        sleep 1
+        k=$((k + 1))
+    done
+    if [ -n "$PASSWORD" ]; then
+        echo -e "${SUCCESS} 检测到 OpenList 初始账户信息："
+        echo -e "    用户名：${C_BOLD_YELLOW}admin${C_RESET}"
+        echo -e "    密码：  ${C_BOLD_YELLOW}$PASSWORD${C_RESET}"
     else
-        echo -e "${WARN} 尚未生成 openlist.log 日志文件。"
+        echo -e "${INFO} 非首次启动未在日志中找到初始密码，请使用您设置的密码。"
     fi
     echo -e "${INFO} 请在系统浏览器访问：${C_BOLD_YELLOW}http://127.0.0.1:5244${C_RESET}"
     return 0
 }
 
 stop_openlist() {
-    if check_openlist_process; then
-        PIDS=$(pgrep -f "$OPENLIST_BIN server")
-        echo -e "${INFO} 检测到 OpenList server 正在运行，PID：${C_BOLD_YELLOW}$PIDS${C_RESET}"
-        echo -e "${INFO} 正在终止 OpenList server..."
-        if force_kill "$OPENLIST_BIN server" "OpenList server"; then
-            echo -e "${SUCCESS} OpenList server 已成功终止。"
-        fi
-    else
-        echo -e "${WARN} OpenList server 未运行。"
+    # 老进程兜底
+    if pgrep -f "$OPENLIST_BIN server" >/dev/null 2>&1 && ! service_running openlist; then
+        echo -e "${INFO} 终止遗留的 OpenList 进程..."
+        force_kill "$OPENLIST_BIN server" "OpenList server" >/dev/null 2>&1 || true
     fi
+
+    if ! [ -d "$SV_DIR/openlist" ]; then
+        if check_openlist_process; then
+            return 0
+        fi
+        echo -e "${WARN} OpenList server 未运行。"
+        return 0
+    fi
+
+    echo -e "${INFO} 正在停止 OpenList server (sv down openlist)..."
+    sv down openlist >/dev/null 2>&1 || true
+
+    local i=0
+    while [ "$i" -lt 6 ]; do
+        if ! service_running openlist; then
+            break
+        fi
+        sleep 1
+        i=$((i + 1))
+    done
+
+    if service_running openlist; then
+        echo -e "${WARN} OpenList 未响应，强制终止..."
+        sv force-stop openlist >/dev/null 2>&1 || true
+        sleep 1
+    fi
+
+    if service_running openlist; then
+        echo -e "${ERROR} 无法停止 OpenList server。"
+        return 1
+    fi
+    echo -e "${SUCCESS} OpenList server 已成功终止。"
     return 0
 }
 
@@ -275,6 +350,7 @@ uninstall_openlist() {
     echo -e "${C_BOLD_RED}!!! 卸载将删除所有 OpenList 数据和配置，是否继续？(y/n):${C_RESET}"
     read -r confirm
     if [ "$confirm" = "y" ] || [ "$confirm" = "Y" ]; then
+        remove_service openlist
         pkill -f "$OPENLIST_BIN" 2>/dev/null || true
         disable_autostart_openlist >/dev/null 2>&1 || true
         rm -rf "$DEST_DIR"

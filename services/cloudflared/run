@@ -1,0 +1,26 @@
+#!/data/data/com.termux/files/usr/bin/sh
+# Cloudflare Tunnel runit service.
+# @@ENV_FILE@@ is replaced at install time with the resolved .env path.
+
+exec 2>&1
+
+PREFIX="${PREFIX:-/data/data/com.termux/files/usr}"
+HOME_DIR="${HOME:-/data/data/com.termux/files/home}"
+ENV_FILE="@@ENV_FILE@@"
+
+if [ -f "$ENV_FILE" ]; then
+    # shellcheck disable=SC1090
+    . "$ENV_FILE"
+fi
+
+if [ -z "${TUNNEL_NAME:-}" ]; then
+    echo "[cloudflared] TUNNEL_NAME not set in $ENV_FILE; refusing to start." >&2
+    # Sleep so runsv doesn't busy-loop restart on a missing config.
+    sleep 30
+    exit 1
+fi
+
+exec "$PREFIX/bin/cloudflared" tunnel \
+    --config "$HOME_DIR/.cloudflared/config.yml" \
+    --no-autoupdate \
+    run "$TUNNEL_NAME"

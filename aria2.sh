@@ -329,11 +329,15 @@ view_aria2_log() {
     echo -e "${C_BOLD_BLUE}┌──────────────────────────┐${C_RESET}"
     echo -e "${C_BOLD_BLUE}│ 查看 aria2 日志          │${C_RESET}"
     echo -e "${C_BOLD_BLUE}└──────────────────────────┘${C_RESET}"
-    if [ -f "$ARIA2_LOG" ]; then
+    local svlog="$HOME/aria2/log/sv/current"
+    if [ -f "$svlog" ]; then
+        echo -e "${INFO} 显示 svlogd 当前日志：${C_BOLD_YELLOW}$svlog${C_RESET}"
+        tail -n 200 "$svlog"
+    elif [ -f "$ARIA2_LOG" ]; then
         echo -e "${INFO} 显示 aria2 日志文件：${C_BOLD_YELLOW}$ARIA2_LOG${C_RESET}"
         tail -n 200 "$ARIA2_LOG"
     else
-        echo -e "${ERROR} 未找到 aria2 日志文件：${C_BOLD_YELLOW}$ARIA2_LOG${C_RESET}"
+        echo -e "${ERROR} 未找到 aria2 日志（svlogd 或 $ARIA2_LOG）"
     fi
     wait_enter
 }
@@ -413,55 +417,81 @@ update_bt_tracker() {
 }
 
 check_aria2_process() {
+    if service_running aria2; then
+        return 0
+    fi
     pgrep -f "$ARIA2_CMD --conf-path=$ARIA2_CONF" >/dev/null 2>&1
 }
 
+migrate_legacy_aria2() {
+    if pgrep -f "$ARIA2_CMD --conf-path=$ARIA2_CONF" >/dev/null 2>&1 && ! service_running aria2; then
+        echo -e "${INFO} 检测到遗留的 aria2 nohup 进程，正在迁移到 runit 监督..."
+        force_kill "$ARIA2_CMD --conf-path=$ARIA2_CONF" "aria2" >/dev/null 2>&1 || true
+    fi
+}
+
+ensure_aria2_service() {
+    ensure_termux_services || return 1
+    install_service aria2 || return 1
+    ensure_runsvdir_running || return 1
+    return 0
+}
+
 enable_autostart_aria2() {
-    mkdir -p "$HOME/.termux/boot"
-    local boot_file="$HOME/.termux/boot/aria2_autostart.sh"
-    cat > "$boot_file" <<EOF
-#!/data/data/com.termux/files/usr/bin/bash
-command -v termux-wake-lock >/dev/null 2>&1 && termux-wake-lock
-mkdir -p "$(dirname "$ARIA2_LOG")"
-ARIA2_CMD="$ARIA2_CMD"
-ARIA2_CONF="$ARIA2_CONF"
-nohup "\$ARIA2_CMD" --conf-path="\$ARIA2_CONF" > "$ARIA2_LOG" 2>&1 < /dev/null &
-EOF
-    chmod +x "$boot_file"
-    echo -e "${SUCCESS} aria2 已成功设置开机自启"
+    ensure_aria2_service || return 1
+    write_services_boot_file
+    clean_legacy_boot_files
+    service_enable_autostart aria2
+    echo -e "${SUCCESS} aria2 已成功设置开机自启（runit 监督）"
 }
 
 disable_autostart_aria2() {
-    local boot_file="$HOME/.termux/boot/aria2_autostart.sh"
-    if [ -f "$boot_file" ]; then
-        rm -f "$boot_file"
-        echo -e "${INFO} 已禁用 aria2 开机自启"
+    if [ -d "$SV_DIR/aria2" ]; then
+        service_disable_autostart aria2
+        echo -e "${INFO} 已禁用 aria2 开机自启（保留服务定义）"
     fi
+    rm -f "$HOME/.termux/boot/aria2_autostart.sh"
 }
 
 start_aria2() {
     ensure_aria2 || return 1
     ensure_aria2_files || return 1
 
-    if check_aria2_process; then
-        PIDS=$(pgrep -f "$ARIA2_CMD --conf-path=$ARIA2_CONF")
-        echo -e "${WARN} aria2 已运行，PID：${C_BOLD_YELLOW}$PIDS${C_RESET}"
+    migrate_legacy_aria2
+    ensure_aria2_service || return 1
+
+    if service_running aria2; then
+        echo -e "${WARN} aria2 已在 runit 下运行。"
+        sv status aria2 2>/dev/null
         return 0
     fi
 
     mkdir -p "$ARIA2_DIR"
     rotate_log "$ARIA2_LOG"
-    echo -e "${INFO} 启动 aria2 ..."
-    ARIA2_PID=$(start_detached_process "$ARIA2_LOG" "$ARIA2_CMD" --conf-path="$ARIA2_CONF")
-    sleep 2
+    echo -e "${INFO} 启动 aria2 (sv up aria2) ..."
+    sv up aria2 >/dev/null 2>&1 || true
 
-    if [ -n "$ARIA2_PID" ] && ps -p "$ARIA2_PID" >/dev/null 2>&1; then
-        echo -e "${SUCCESS} aria2 已启动 (PID: ${C_BOLD_YELLOW}$ARIA2_PID${C_RESET})."
+    local i=0
+    while [ "$i" -lt 6 ]; do
+        if service_running aria2; then
+            break
+        fi
+        sleep 1
+        i=$((i + 1))
+    done
+
+    if service_running aria2; then
+        local pid
+        pid=$(sv status aria2 2>/dev/null | sed -n 's/^run: aria2: (pid \([0-9]\+\)).*/\1/p')
+        echo -e "${SUCCESS} aria2 已启动 (PID: ${C_BOLD_YELLOW}${pid:-?}${C_RESET})."
         echo -e "${INFO} 配置文件：${C_BOLD_YELLOW}$ARIA2_CONF${C_RESET}"
         echo -e "${INFO} 下载目录：${C_BOLD_YELLOW}$(get_default_download_dir)${C_RESET}"
         echo -e "${INFO} RPC 端口：${C_BOLD_YELLOW}6800${C_RESET}（密钥已从 .env 注入）"
     else
         echo -e "${ERROR} aria2 启动失败。"
+        sv status aria2 2>/dev/null || true
+        local svlog="$HOME/aria2/log/sv/current"
+        [ -f "$svlog" ] && tail -n 50 "$svlog"
         [ -f "$ARIA2_LOG" ] && tail -n 50 "$ARIA2_LOG"
         return 1
     fi
@@ -469,16 +499,42 @@ start_aria2() {
 }
 
 stop_aria2() {
-    if check_aria2_process; then
-        PIDS=$(pgrep -f "$ARIA2_CMD --conf-path=$ARIA2_CONF")
-        echo -e "${INFO} 检测到 aria2 正在运行，PID：${C_BOLD_YELLOW}$PIDS${C_RESET}"
-        echo -e "${INFO} 正在终止 aria2 ..."
-        if force_kill "$ARIA2_CMD --conf-path=$ARIA2_CONF" "aria2"; then
-            echo -e "${SUCCESS} aria2 已成功终止。"
-        fi
-    else
-        echo -e "${WARN} aria2 未运行。"
+    if pgrep -f "$ARIA2_CMD --conf-path=$ARIA2_CONF" >/dev/null 2>&1 && ! service_running aria2; then
+        echo -e "${INFO} 终止遗留的 aria2 进程..."
+        force_kill "$ARIA2_CMD --conf-path=$ARIA2_CONF" "aria2" >/dev/null 2>&1 || true
     fi
+
+    if ! [ -d "$SV_DIR/aria2" ]; then
+        if check_aria2_process; then
+            return 0
+        fi
+        echo -e "${WARN} aria2 未运行。"
+        return 0
+    fi
+
+    echo -e "${INFO} 正在停止 aria2 (sv down aria2) ..."
+    sv down aria2 >/dev/null 2>&1 || true
+
+    local i=0
+    while [ "$i" -lt 6 ]; do
+        if ! service_running aria2; then
+            break
+        fi
+        sleep 1
+        i=$((i + 1))
+    done
+
+    if service_running aria2; then
+        echo -e "${WARN} aria2 未响应，强制终止..."
+        sv force-stop aria2 >/dev/null 2>&1 || true
+        sleep 1
+    fi
+
+    if service_running aria2; then
+        echo -e "${ERROR} 无法停止 aria2。"
+        return 1
+    fi
+    echo -e "${SUCCESS} aria2 已成功终止。"
     return 0
 }
 
@@ -486,6 +542,7 @@ uninstall_aria2() {
     echo -e "${C_BOLD_RED}!!! 卸载将删除所有 aria2 数据和配置，是否继续？(y/n):${C_RESET}"
     read -r confirm
     if [ "$confirm" = "y" ] || [ "$confirm" = "Y" ]; then
+        remove_service aria2
         pkill -f "$ARIA2_CMD" 2>/dev/null || true
         if command -v pkg >/dev/null 2>&1; then
             pkg uninstall -y aria2 && apt autoremove -y

@@ -1,0 +1,15 @@
+#!/data/data/com.termux/files/usr/bin/sh
+# OpenList runit service
+# Generated/installed by openlist_termux. Do not edit by hand; reinstall the
+# service via the management menu instead.
+
+exec 2>&1
+
+PREFIX="${PREFIX:-/data/data/com.termux/files/usr}"
+HOME_DIR="${HOME:-/data/data/com.termux/files/home}"
+WORK_DIR="$HOME_DIR/Openlist"
+
+mkdir -p "$WORK_DIR/data/log"
+cd "$WORK_DIR" || exit 1
+
+exec "$PREFIX/bin/openlist" server

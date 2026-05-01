@@ -1,0 +1,11 @@
+#!/data/data/com.termux/files/usr/bin/sh
+# aria2 runit service.
+
+exec 2>&1
+
+PREFIX="${PREFIX:-/data/data/com.termux/files/usr}"
+HOME_DIR="${HOME:-/data/data/com.termux/files/home}"
+ARIA2_DIR="$HOME_DIR/aria2"
+
+mkdir -p "$ARIA2_DIR"
+exec "$PREFIX/bin/aria2c" --conf-path="$ARIA2_DIR/aria2.conf"

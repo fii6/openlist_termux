@@ -39,7 +39,7 @@ init_paths() {
     DATA_DIR="$DEST_DIR/data"
     OPENLIST_BIN="$PREFIX/bin/openlist"
     OPENLIST_LOGDIR="$DATA_DIR/log"
-    OPENLIST_LOG="$OPENLIST_LOGDIR/openlist.log"
+    OPENLIST_LOG="$OPENLIST_LOGDIR/log.log"
     OPENLIST_CONF="$DATA_DIR/config.json"
 
     ARIA2_DIR="$HOME/aria2"
@@ -190,39 +190,56 @@ divider() {
 }
 
 openlist_status_line() {
-    if check_openlist_process; then
+    if service_running openlist; then
+        local pid
+        pid=$(sv status openlist 2>/dev/null | sed -n 's/^run: openlist: (pid \([0-9]\+\)).*/\1/p')
+        echo -e "OpenList 状态：${C_BOLD_GREEN}运行中 (PID: ${pid:-?})${C_RESET}"
+    elif pgrep -f "$OPENLIST_BIN server" >/dev/null 2>&1; then
         PIDS=$(pgrep -f "$OPENLIST_BIN server")
-        echo -e "${INFO} OpenList 状态：${C_BOLD_GREEN}运行中 (PID: $PIDS)${C_RESET}"
+        echo -e "OpenList 状态：${C_BOLD_YELLOW}运行中 (legacy, PID: $PIDS)${C_RESET}"
     else
-        echo -e "${INFO} OpenList 状态：${C_BOLD_RED}未运行${C_RESET}"
+        echo -e "OpenList 状态：${C_BOLD_RED}未运行${C_RESET}"
     fi
 }
 
 aria2_status_line() {
-    if check_aria2_process; then
+    if service_running aria2; then
+        local pid
+        pid=$(sv status aria2 2>/dev/null | sed -n 's/^run: aria2: (pid \([0-9]\+\)).*/\1/p')
+        echo -e "aria2 状态：${C_BOLD_GREEN}运行中 (PID: ${pid:-?})${C_RESET}"
+    elif pgrep -f "$ARIA2_CMD --conf-path=$ARIA2_CONF" >/dev/null 2>&1; then
         PIDS=$(pgrep -f "$ARIA2_CMD --conf-path=$ARIA2_CONF")
-        echo -e "${INFO} aria2 状态：${C_BOLD_GREEN}运行中 (PID: $PIDS)${C_RESET}"
+        echo -e "aria2 状态：${C_BOLD_YELLOW}运行中 (legacy, PID: $PIDS)${C_RESET}"
     else
-        echo -e "${INFO} aria2 状态：${C_BOLD_RED}未运行${C_RESET}"
+        echo -e "aria2 状态：${C_BOLD_RED}未运行${C_RESET}"
     fi
 }
 
 tunnel_status_line() {
     if [ -z "$TUNNEL_NAME" ]; then
-        echo -e "${INFO} 隧道状态：${C_BOLD_YELLOW}未配置${C_RESET}"
+        echo -e "隧道状态：${C_BOLD_YELLOW}未配置${C_RESET}"
         return
     fi
-    if pgrep -f "cloudflared.*$TUNNEL_NAME" >/dev/null; then
-        PIDS=$(pgrep -f "cloudflared.*$TUNNEL_NAME")
+
+    local pid="" running=0
+    if service_running cloudflared; then
+        running=1
+        pid=$(sv status cloudflared 2>/dev/null | sed -n 's/^run: cloudflared: (pid \([0-9]\+\)).*/\1/p')
+    elif pgrep -f "cloudflared.*$TUNNEL_NAME" >/dev/null 2>&1; then
+        running=1
+        pid=$(pgrep -f "cloudflared.*$TUNNEL_NAME")
+    fi
+
+    if [ "$running" -eq 1 ]; then
         if tunnel_log_has_connection; then
-            echo -e "${INFO} 隧道状态：${C_BOLD_GREEN}已连接 (PID: $PIDS)${C_RESET}"
+            echo -e "隧道状态：${C_BOLD_GREEN}已连接 (PID: ${pid:-?})${C_RESET}"
         elif tunnel_log_has_edge_error; then
-            echo -e "${INFO} 隧道状态：${C_BOLD_YELLOW}进程运行中，但未连通 Edge (PID: $PIDS)${C_RESET}"
+            echo -e "隧道状态：${C_BOLD_YELLOW}进程运行中，但未连通 Edge (PID: ${pid:-?})${C_RESET}"
         else
-            echo -e "${INFO} 隧道状态：${C_BOLD_YELLOW}启动中 (PID: $PIDS)${C_RESET}"
+            echo -e "隧道状态：${C_BOLD_YELLOW}启动中 (PID: ${pid:-?})${C_RESET}"
         fi
     else
-        echo -e "${INFO} 隧道状态：${C_BOLD_RED}未运行${C_RESET}"
+        echo -e "隧道状态：${C_BOLD_RED}未运行${C_RESET}"
     fi
 }
 
@@ -286,17 +303,24 @@ uninstall_all() {
 
     echo ""
 
-    # 停止所有进程
+    # 停止所有 runit 服务（如已安装）
     echo -e "${INFO} 正在停止所有进程..."
+    remove_service openlist
+    remove_service aria2
+    remove_service cloudflared
+
+    # 兜底：清理仍以 nohup 残留的进程
     pkill -f "$OPENLIST_BIN" 2>/dev/null || true
     pkill -f "$ARIA2_CMD" 2>/dev/null || true
     pkill -f "cloudflared" 2>/dev/null || true
     sleep 1
 
-    # 禁用开机自启
+    # 禁用开机自启 + 清理 boot 脚本
     disable_autostart_openlist >/dev/null 2>&1 || true
     disable_autostart_aria2 >/dev/null 2>&1 || true
     disable_autostart_tunnel >/dev/null 2>&1 || true
+    remove_services_boot_file
+    clean_legacy_boot_files
 
     # 删除数据和配置
     echo -e "${INFO} 正在删除 OpenList..."
@@ -385,7 +409,7 @@ show_menu() {
     openlist_status_line
     aria2_status_line
     tunnel_status_line
-    echo -e "${INFO} OpenList 版本：$ver_status"
+    echo -e "OpenList 版本：$ver_status"
     echo -e "${C_BOLD_BLUE}=====================================${C_RESET}"
     echo -e "${C_BOLD_GREEN}1. 安装 OpenList${C_RESET}"
     echo -e "${C_BOLD_YELLOW}2. 更新 OpenList${C_RESET}"
